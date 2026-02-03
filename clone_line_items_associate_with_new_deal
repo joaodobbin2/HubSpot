@@ -1,0 +1,142 @@
+const originalDealId = inputData.original_deal_id;
+const renewalDealId = inputData.renewal_deal_id;
+const accessToken = inputData.access_token;
+
+if (!originalDealId || !renewalDealId || !accessToken) {
+  throw new Error("Missing required inputs: original_deal_id, renewal_deal_id, or access_token.");
+}
+
+// The properties you requested. 
+// NOTE: I added 'price' because HubSpot requires Unit Price to calculate totals correctly.
+const propertiesToFetch = [
+  "hs_product_type",
+  "add_on_sku",
+  "sku__dropdown_",
+  "hs_total_discount",
+  "hs_pre_discount_amount",
+  "hs_recurring_billing_number_of_payments",
+  "hs_recurring_billing_period",
+  "hs_recurring_billing_terms",
+  "recurringbillingfrequency",
+  "hs_sku",
+  "hs_line_item_currency_code",
+  "amount",
+  "name",
+  "quantity",
+  "description",
+  "discount",
+  "hs_discount_percentage",
+  "price" // Critical for calculating the correct amount upon creation
+];
+
+// ------------------------------------------------------------------
+// HELPER: HubSpot API Request Wrapper
+// ------------------------------------------------------------------
+async function hubspotRequest(method, endpoint, body = null) {
+  const url = `https://api.hubapi.com/${endpoint}`;
+  const options = {
+    method: method,
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    }
+  };
+  if (body) options.body = JSON.stringify(body);
+
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    const errorBody = await response.text();
+    throw new Error(`HubSpot API Error ${response.status}: ${errorBody}`);
+  }
+  // Return null for 204 No Content, otherwise JSON
+  return response.status === 204? null : await response.json();
+}
+
+// ------------------------------------------------------------------
+// MAIN EXECUTION FLOW
+// ------------------------------------------------------------------
+try {
+  // STEP 1: Get Association IDs (Original Deal -> Line Items)
+  // We use the v4 associations endpoint
+  const associationEndpoint = `crm/v4/objects/deals/${originalDealId}/associations/line_items`;
+  const assocData = await hubspotRequest('GET', associationEndpoint);
+  
+  const associatedLineItemIds = assocData.results.map(a => a.toObjectId);
+
+  if (associatedLineItemIds.length === 0) {
+    return { status: "No line items found on original deal." };
+  }
+
+  // STEP 2: Batch Read Line Item Details
+  // We need the properties to filter and clone
+  const batchReadEndpoint = `crm/v3/objects/line_items/batch/read`;
+  const readPayload = {
+    inputs: associatedLineItemIds.map(id => ({ id })),
+    properties: propertiesToFetch
+  };
+  
+  const lineItemsData = await hubspotRequest('POST', batchReadEndpoint, readPayload);
+
+  // STEP 3: Filter & Prepare New Line Items
+  // Condition: recurringbillingfrequency must be known (not null/undefined)
+  const itemsToCreate = [];
+
+  for (const item of lineItemsData.results) {
+    const props = item.properties;
+
+    // Filter Logic
+    if (props.recurringbillingfrequency) {
+      
+      // Clean up properties: Remove read-only or null fields before sending back
+      const cleanProperties = {};
+      propertiesToFetch.forEach(key => {
+        // We generally don't want to copy 'amount' directly as it's a calculated field 
+        // derived from price * quantity - discount. Sending it can sometimes cause conflicts.
+        // We prioritize 'price' (Unit Price).
+        if (key !== 'amount' && props[key] !== null && props[key] !== "") {
+          cleanProperties[key] = props[key];
+        }
+      });
+
+      // Prepare the Create Object (including association to Renewal Deal)
+      itemsToCreate.push({
+        properties: cleanProperties,
+        associations: [
+          {
+            to: { id: renewalDealId },
+            types: [
+              { associationCategory: "HUBSPOT_DEFINED", associationTypeId: 20 } // 20 is standard Deal-to-LineItem
+            ]
+          }
+        ]
+      });
+    }
+  }
+
+  if (itemsToCreate.length === 0) {
+    return { status: "No recurring line items found to clone." };
+  }
+
+  // STEP 4: Batch Create New Line Items
+  const createEndpoint = `crm/v3/objects/line_items/batch/create`;
+  const createPayload = { inputs: itemsToCreate };
+
+  const createResponse = await hubspotRequest('POST', createEndpoint, createPayload);
+
+  // ------------------------------------------------------------------
+  // OUTPUT
+  // ------------------------------------------------------------------
+  return {
+    status: "Success",
+    original_items_scanned: associatedLineItemIds.length,
+    items_created: itemsToCreate.length,
+    created_ids: createResponse.results.map(r => r.id)
+  };
+
+} catch (error) {
+  // Log error for Zapier debugging
+  return { 
+    status: "Error", 
+    message: error.message 
+  };
+}
