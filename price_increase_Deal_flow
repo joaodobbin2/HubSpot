@@ -94,6 +94,7 @@ return (async () => {
                     closedate: dateStr,
                     contract_term_start_date: dateStr,
                     renewal_type: "Upsell",
+                    renewal_deal_id: "masterId",
                     overarching_upsell_type: "Contract Price Increase"
                 }
             });
