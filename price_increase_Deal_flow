@@ -19,7 +19,7 @@ async function callHubSpot(url, method, body = null) {
     return data;
 }
 
-// ✅ Main Logic
+// Logic
 return (async () => {
     try {
         // Use a direct count of how many deals to create
