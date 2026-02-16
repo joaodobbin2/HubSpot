@@ -1,0 +1,59 @@
+import os
+import requests
+
+def main(event):
+    # 1. Get the domain input
+    domain = event.get('inputFields').get('email_domain')
+    if not domain:
+        return {"outputFields": {"is_corporate_email": False}}
+    
+    domain_clean = domain.strip().lower()
+    
+    # 2. Setup Auth - Try built-in token first for stability, then your secret
+    token = os.getenv('HSAccessToken') or os.getenv('Bounce')
+    table_id = "TABLE_ID"
+    portal_id = "PORTAL_ID"
+    
+    # The standard V3 endpoint (the one that previously gave the 403)
+    url = f"https://api.hubapi.com/cms/v3/hubdb/tables/{table_id}/rows"
+    
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/json'
+    }
+    
+    # Adding portalId as a parameter is the "magic fix" for the deduction error
+    params = {
+        'domain__eq': domain_clean,
+        'portalId': portal_id
+    }
+
+    print(f"Auditing domain: {domain_clean}")
+
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        
+        # If 404 happens here, it means the table ID itself is wrong 
+        # (but we know 174721341 exists because of your previous 403)
+        if response.status_code != 200:
+            print(f"Status: {response.status_code}")
+            print(f"Body: {response.text}")
+            response.raise_for_status()
+
+        data = response.json()
+        results = data.get('results', [])
+        
+        # 0 matches found in your 'Free' list = Corporate (True)
+        is_corporate = (len(results) == 0)
+        
+        print(f"Matches: {len(results)} | Corporate: {is_corporate}")
+
+        return {
+            "outputFields": {
+                "is_corporate_email": is_corporate
+            }
+        }
+
+    except Exception as e:
+        print(f"Audit Error: {e}")
+        return {"outputFields": {"is_corporate_email": False}}
