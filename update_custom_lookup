@@ -1,0 +1,75 @@
+// --- CONFIGURATION ---
+const HUBSPOT_TOKEN = 'token'; // Paste your Private App Token here
+
+// Define the properties we want to update. In this example, I was updating a "Partner" dropdown on both Contact and Deal records
+const PROPERTIES = [
+  { objectType: 'deals', propertyName: 'partner' },
+  { objectType: 'contacts', propertyName: 'contact_partner_dropdown' }
+];
+
+// --- LOGIC ---
+const partnerName = inputData.partnerName;
+const partnerId = inputData.partnerId;
+
+if (!partnerName || !partnerId) {
+  output = { status: 'Skipped', message: 'Missing Name or ID' };
+} else {
+
+  // 1. Fetch the current options from the Deal property (treating it as the "Master" list)
+  // We use the deal property to get the current state, then apply it to both.
+  const getUrl = `https://api.hubapi.com/properties/v2/deals/properties/named/${PROPERTIES[0].propertyName}`;
+  
+  const getResponse = await fetch(getUrl, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${HUBSPOT_TOKEN}`,
+      'Content-Type': 'application/json'
+    }
+  });
+
+  if (!getResponse.ok) {
+    throw new Error(`Error fetching options: ${getResponse.statusText}`);
+  }
+
+  const data = await getResponse.json();
+  let currentOptions = data.options || [];
+
+  // 2. Check if the new partner already exists to avoid duplicates
+  const exists = currentOptions.find(opt => opt.value === partnerId);
+
+  if (!exists) {
+    // 3. Add the new partner to the array
+    currentOptions.push({
+      "label": partnerName,
+      "value": partnerId,
+      "hidden": false,
+      "displayOrder": -1 // Adds it to the end
+    });
+
+    // 4. Update BOTH properties (Deals and Contacts) with the new list
+    const updatePromises = PROPERTIES.map(async (prop) => {
+      const patchUrl = `https://api.hubapi.com/properties/v2/${prop.objectType}/properties/named/${prop.propertyName}`;
+      
+      const patchResponse = await fetch(patchUrl, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${HUBSPOT_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ options: currentOptions })
+      });
+
+      return { 
+        object: prop.objectType, 
+        status: patchResponse.status 
+      };
+    });
+
+    // Wait for both updates to finish
+    const results = await Promise.all(updatePromises);
+    output = { status: 'Success', results: results, added: partnerName };
+    
+  } else {
+    output = { status: 'Skipped', message: 'Partner already exists' };
+  }
+}
