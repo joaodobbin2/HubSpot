@@ -1,0 +1,159 @@
+// 1. Helper for Date Parsing
+function parseHubSpotDate(timestamp) {
+    if (!timestamp || isNaN(timestamp)) return null;
+    return new Date(parseInt(timestamp));
+}
+
+// 2. Helper for API Calls
+async function callHubSpot(url, method, body = null) {
+    const res = await fetch(url, {
+        method: method,
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${inputData.hubspotToken}`
+        },
+        body: body ? JSON.stringify(body) : null
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(`HS API Error: ${JSON.stringify(data)}`);
+    return data;
+}
+
+// ✅ Main Logic
+return (async () => {
+    try {
+        const billingCycles = parseInt(inputData.terms); 
+        const percent = parseFloat(inputData.percentIncrease) / 100;
+        const masterId = inputData.originalDealId;
+        const companyId = inputData.companyId;
+        const startDate = parseHubSpotDate(inputData.startDate);
+        const dealNameBase = inputData.originalDealName;
+
+        if (!startDate) throw new Error("Start Date is missing or invalid.");
+        if (isNaN(billingCycles) || billingCycles < 1) return { message: "No billing cycles specified." };
+
+        // A. GET ORIGINAL LINE ITEMS
+        const assocData = await callHubSpot(`https://api.hubapi.com/crm/v3/objects/deals/${masterId}/associations/line_items`, 'GET');
+        
+        if (!assocData.results || assocData.results.length === 0) {
+            return { message: "No Line Items found on master deal." };
+        }
+
+        // Fetch required fields for compounding AND copying over
+        const propertiesToFetch = [
+            "name", "quantity", "amount", "hs_product_id", 
+            "hs_product_type", "add_on_sku", "sku__dropdown_", 
+            "hs_recurring_billing_number_of_payments", "hs_recurring_billing_period", 
+            "hs_recurring_billing_terms", "recurringbillingfrequency", "hs_sku", 
+            "hs_line_item_currency_code", "description"
+        ];
+
+        const lineItemDetails = await callHubSpot(`https://api.hubapi.com/crm/v3/objects/line_items/batch/read`, 'POST', {
+            properties: propertiesToFetch,
+            inputs: assocData.results.map(item => ({ id: item.id }))
+        });
+
+        // Store current state (Net Prices)
+        let productStates = lineItemDetails.results.map(item => ({
+            id: item.properties.hs_product_id,
+            name: item.properties.name,
+            qty: parseFloat(item.properties.quantity || 1),
+            totalAmount: parseFloat(item.properties.amount || 0),
+            originalProps: item.properties // Store all properties to conditionally copy
+        }));
+
+        let createdDeals = [];
+
+        // B. THE LOOP
+        for (let i = 1; i <= billingCycles; i++) {
+            
+            // Calculate Anniversary Date backwards from Start Date
+            let annDate = new Date(startDate);
+            const yearsToSubtract = billingCycles - i + 1;
+            annDate.setFullYear(startDate.getFullYear() - yearsToSubtract);
+            const dateStr = annDate.toISOString().split('T')[0];
+            
+            let yearTotalDelta = 0;
+            let deltaLineItems = [];
+
+            // Update States & Calculate Delta
+            productStates = productStates.map(p => {
+                const deltaAmount = p.totalAmount * percent;
+                const nextYearTotal = p.totalAmount + deltaAmount;
+                yearTotalDelta += deltaAmount;
+
+                // Unit Price = Total Delta / Original Quantity
+                const unitPrice = deltaAmount / p.qty;
+
+                // Base properties (no discounts or original prices passed)
+                let newLineItemProps = {
+                    name: `Increase: ${p.name}`,
+                    quantity: p.qty.toString(),
+                    price: unitPrice.toFixed(4), 
+                    hs_product_id: p.id,
+                    order_type: "Price Increase" 
+                };
+
+                // Copy over the requested default fields (if they exist)
+                const fieldsToCopy = [
+                    "hs_product_type", "add_on_sku", "sku__dropdown_", 
+                    "hs_recurring_billing_number_of_payments", "hs_recurring_billing_period", 
+                    "hs_recurring_billing_terms", "recurringbillingfrequency", "hs_sku", 
+                    "hs_line_item_currency_code", "description"
+                ];
+
+                fieldsToCopy.forEach(field => {
+                    if (p.originalProps[field] !== undefined && p.originalProps[field] !== null) {
+                        newLineItemProps[field] = p.originalProps[field];
+                    }
+                });
+
+                deltaLineItems.push({ properties: newLineItemProps });
+                
+                return { ...p, totalAmount: nextYearTotal };
+            });
+
+            // C. CREATE DEAL
+            const newDeal = await callHubSpot('https://api.hubapi.com/crm/v3/objects/deals', 'POST', {
+                properties: {
+                    dealname: `${dealNameBase} - Year ${i} Increase`,
+                    amount: yearTotalDelta.toFixed(2),
+                    pipeline: inputData.pipelineId,
+                    dealstage: inputData.dealStageId,
+                    closedate: dateStr,
+                    contract_term_start_date: dateStr,
+                    renewal_type: "Upsell",
+                    overarching_upsell_type: "Contract Price Increase",
+                    renewal_deal_id: masterId
+                }
+            });
+
+            // D. ASSOCIATE COMPANY & MASTER DEAL
+            if (companyId) {
+                await callHubSpot('https://api.hubapi.com/crm/v4/associations/deals/companies/batch/create', 'POST', {
+                    inputs: [{ from: { id: newDeal.id }, to: { id: companyId }, types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: 341 }] }]
+                });
+            }
+            await callHubSpot('https://api.hubapi.com/crm/v4/associations/deals/deals/batch/create', 'POST', {
+                inputs: [{ from: { id: newDeal.id }, to: { id: masterId }, types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: 451 }] }]
+            });
+
+            // E. CREATE AND ATTACH LINE ITEMS
+            const batchLI = await callHubSpot('https://api.hubapi.com/crm/v3/objects/line_items/batch/create', 'POST', { inputs: deltaLineItems });
+            await callHubSpot('https://api.hubapi.com/crm/v4/associations/deals/line_items/batch/create', 'POST', {
+                inputs: batchLI.results.map(li => ({
+                    from: { id: newDeal.id },
+                    to: { id: li.id },
+                    types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: 19 }]
+                }))
+            });
+
+            createdDeals.push({ id: newDeal.id, name: `${dealNameBase} - Year ${i}`, date: dateStr });
+        }
+
+        return { success: true, createdDeals };
+
+    } catch (err) {
+        throw new Error(err.message);
+    }
+})();
