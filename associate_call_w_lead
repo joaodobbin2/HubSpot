@@ -1,0 +1,33 @@
+const HUBSPOT_API_KEY = "REPLACE-ME"; // Your token
+
+const engagementId = inputData.engagementId;
+const leadId = inputData.leadId;
+
+const url = "https://api.hubapi.com/crm/v3/associations/lead/call/batch/create";
+
+const options = {
+method: "POST",
+headers: {
+"Authorization": `Bearer ${HUBSPOT_API_KEY}`,
+"Content-Type": "application/json"
+},
+body: JSON.stringify({
+inputs: [
+{
+from: { id: leadId },
+to: { id: engagementId },
+type: 596 // Replace 1234 with the correct association type ID
+}
+]
+})
+};
+fetch(url, options)
+.then(response => response.json()) // Ensure we parse JSON properly
+.then(data => {
+console.log("HubSpot API Response:", data);
+callback(null, data);
+})
+.catch(error => {
+console.error("Error:", error);
+callback(null, { success: false, error: error.message });
+});
