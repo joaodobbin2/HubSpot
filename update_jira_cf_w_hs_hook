@@ -1,0 +1,98 @@
+// ===== Inputs =====
+const jiraDomain = (inputData.jiraDomain || '').replace(/\/+$/,''); // remove trailing slash
+const jiraEmail  = inputData.jiraEmail;
+const jiraToken  = inputData.jiraToken;
+const fieldId    = inputData.fieldId;      // e.g., customfield_10091
+const contextId  = inputData.contextId;    // e.g., 10192
+let   labels     = inputData.labels;       // comma-separated or array
+
+// ===== Helpers =====
+function toArray(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v === 'string') return v.split(',').map(s => s.trim()).filter(Boolean);
+  return [];
+}
+labels = [...new Set(toArray(labels))]; // normalize + dedupe
+
+const base = `https://${jiraDomain}/rest/api/3`;
+const authHeader = 'Basic ' + Buffer.from(`${jiraEmail}:${jiraToken}`).toString('base64');
+
+async function getOptions() {
+  const url = `${base}/field/${encodeURIComponent(fieldId)}/context/${encodeURIComponent(contextId)}/option?startAt=0&maxResults=1000`;
+  const res = await fetch(url, { headers: { Authorization: authHeader, Accept: 'application/json' }});
+  if (!res.ok) throw new Error(`GET options failed: ${res.status} ${await res.text()}`);
+  const data = await res.json();
+  const list = data.values || [];
+  const byValue = new Map(list.map(o => [o.value, o])); // value -> option obj
+  return { list, byValue };
+}
+
+async function createOptions(missingValues) {
+  if (!missingValues.length) return { created: [] };
+  const url = `${base}/field/${encodeURIComponent(fieldId)}/context/${encodeURIComponent(contextId)}/option`;
+  const payload = { options: missingValues.map(v => ({ value: v })) };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: authHeader,
+      Accept: 'application/json',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error(`POST options failed: ${res.status} ${await res.text()}`);
+  const data = await res.json();
+  return { created: data.options || [] };
+}
+
+// Optional PUT for renames/disable if you need it later
+async function updateOptions(updates /* [{id, value?, disabled?}] */) {
+  if (!updates || !updates.length) return { updatedCount: 0 };
+  const url = `${base}/field/${encodeURIComponent(fieldId)}/context/${encodeURIComponent(contextId)}/option`;
+  const payload = { options: updates };
+  const res = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      Authorization: authHeader,
+      Accept: 'application/json',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error(`PUT options failed: ${res.status} ${await res.text()}`);
+  return { updatedCount: updates.length };
+}
+
+async function main() {
+  try {
+    // 1) Current options
+    const { list, byValue } = await getOptions();
+
+    // 2) Create any missing labels
+    const missing = labels.filter(v => !byValue.has(v));
+    const { created } = await createOptions(missing);
+
+    // 3) (Optional) updates (rename/disable) — keep empty for now
+    const updates = [];
+    const { updatedCount } = await updateOptions(updates);
+
+    // 4) Final list (re-fetch only if we created something)
+    const final = created.length ? (await getOptions()).list : list;
+
+    // ✅ Always return an object
+    return {
+      ok: true,
+      createdCount: created.length,
+      updatedCount,
+      totalOptions: final.length,
+      createdIds: created.map(o => o.id),
+      options: final
+    };
+  } catch (err) {
+    // ✅ Return a structured error (don’t throw) so Zapier sees an output
+    return { ok: false, error: String(err && err.message ? err.message : err) };
+  }
+}
+
+// 👇 THIS is the key line that fixes your error
+return main();
